@@ -129,8 +129,9 @@ export function validateH3Input(input){
   const p=input.parameters??{};if(!p||typeof p!=='object'||Array.isArray(p))throw Error('parameters must be a JSON object.');
   const allowed=new Set(['durationSeconds','aspectRatio','megapixels','steps','promptOptimization','highestConsistency','interpolation','zipOnly','loraStrength']);
   if(Object.keys(p).some(key=>!allowed.has(key)))throw Error('parameters contains an unsupported field.');
-  const duration=p.durationSeconds??inferDuration(input.prompt);
+  const inferred=inferDuration(input.prompt),duration=p.durationSeconds??inferred??10;
   if(!Number.isInteger(duration)||duration<5||duration>15)throw Error('durationSeconds must be an integer from 5 through 15.');
+  if(inferred!==null&&inferred>duration)throw Error('Prompt timeline exceeds durationSeconds; resolve the conflict instead of truncating it.');
   const aspects=['1:1','2:3','3:2','3:4','4:3','9:16','16:9','21:9'];
   const aspectRatio=p.aspectRatio??(deriveAspect(references)??'16:9');if(!aspects.includes(aspectRatio))throw Error('Unsupported H3 aspect ratio.');
   const number=(name,fallback,min,max)=>{const v=p[name]??fallback;if(typeof v!=='number'||!Number.isFinite(v)||v<min||v>max)throw Error(`Invalid ${name}.`);return v;};
@@ -138,7 +139,12 @@ export function validateH3Input(input){
   const steps=number('steps',8,1,50);if(!Number.isInteger(steps))throw Error('steps must be an integer.');
   return {prompt:input.prompt,references,parameters:{durationSeconds:duration,aspectRatio,megapixels:number('megapixels',0.4,0.1,2),steps,promptOptimization:bool('promptOptimization'),highestConsistency:bool('highestConsistency'),interpolation:bool('interpolation'),zipOnly:bool('zipOnly'),loraStrength:number('loraStrength',0,0,2)}};
 }
-function inferDuration(prompt){const matches=[...prompt.matchAll(/(?:\b|^)(5|6|7|8|9|10|11|12|13|14|15)\s*(?:seconds?|secs?|秒)(?:\b|$)/gi)];return matches.length?Number(matches.at(-1)[1]):10;}
+function inferDuration(prompt){
+  const ranges=[...prompt.matchAll(/(\d+(?:\.\d+)?)\s*(?:s|秒|seconds?)?\s*[-–—~至]\s*(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|秒|s)(?![a-z])/gi)];
+  for(const match of ranges)if(Number(match[1])>Number(match[2]))throw Error('Prompt timeline is reversed.');
+  const seconds=[...prompt.matchAll(/(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|秒)(?![a-z])/gi)];
+  const values=[...ranges.map(m=>Number(m[2])),...seconds.map(m=>Number(m[1]))];return values.length?Math.max(...values):null;
+}
 function deriveAspect(references){
   const dimensions=references.find(ref=>ref.role==='first-frame')?.dimensions;if(!dimensions?.width||!dimensions?.height)return null;
   const ratios=['1:1','2:3','3:2','3:4','4:3','9:16','16:9','21:9'];const actual=dimensions.width/dimensions.height;
@@ -170,6 +176,7 @@ export function buildNodeInfo(schema,input,uploadedNames){
   const required=new Set(['150.value','186.value','115.aspect_ratio']);
   return SLOT_KEYS.flatMap(key=>{
     const [nodeId,fieldName]=key.split('.');const value=values[key];if(value===undefined||value===null||value===''){if(required.has(key))throw Error(`Missing H3 parameter ${key}.`);return [];}
+    if(typeof value==='number')for(const option of schema.byKey.get(key).options??[]){const bound=object(option);if((typeof bound.min==='number'&&value<bound.min)||(typeof bound.max==='number'&&value>bound.max))throw Error(`H3 parameter ${key} is outside the live schema bounds.`);}
     return [{nodeId,fieldName,fieldValue:typeof value==='string'?value:JSON.stringify(value)}];
   });
 }
@@ -195,13 +202,25 @@ export async function queryTask(apiKey,taskId){
   if(!outputs.length)throw Error('RunningHub returned success without a downloadable output.');
   return {status:'succeeded',outputs,usage};
 }
+export async function downloadTaskOutput(apiKey,taskId,index){
+  if(!Number.isInteger(index)||index<0||index>9)throw Error('Output index is invalid.');
+  const body=await jsonRequest(`${RH_BASE}/task/openapi/outputs`,{method:'POST',headers:{Authorization:`Bearer ${apiKey}`,'Content-Type':'application/json'},body:JSON.stringify({apiKey,taskId})});
+  if(Number(body.code)!==0)throw Error('RunningHub output is not ready.');
+  const records=Array.isArray(body.data)?body.data:[object(body.data)],item=records[index];
+  if(typeof item?.fileUrl!=='string')throw Error('RunningHub output was not found.');
+  let target;try{target=new URL(item.fileUrl);}catch{throw Error('RunningHub output URL is invalid.');}
+  if(target.protocol!=='https:'||target.username||target.password)throw Error('RunningHub output must use a safe HTTPS URL.');
+  const response=await fetch(target,{redirect:'error',signal:AbortSignal.timeout(120000)});
+  if(!response.ok){await response.body?.cancel();throw Error('RunningHub output download failed.');}
+  return response;
+}
 function safeOutput(item){
   let url=null,requiresRunningHubAccount=false;
   try{
     const parsed=new URL(item.fileUrl);const sensitive=['rh-comfy-auth','rh-identify','token','access_token','signature','sig','auth','authorization','apikey','api_key'];
     if(parsed.protocol==='https:'&&!parsed.username&&!parsed.password){
       const host=parsed.hostname.toLowerCase(),trusted=host==='runninghub.ai'||host.endsWith('.runninghub.ai')||host==='xiaoyaoyou.com'||host.endsWith('.xiaoyaoyou.com');
-      if(!trusted||[...parsed.searchParams.keys()].some(key=>sensitive.includes(key.toLowerCase())))requiresRunningHubAccount=true;
+      if(!trusted||[...parsed.searchParams.keys()].some(key=>{const name=key.toLowerCase();return sensitive.includes(name)||/^(x-amz-|x-goog-|x-oss-)/.test(name)||['awsaccesskeyid','googleaccessid','ossaccesskeyid','key-pair-id','policy'].includes(name);}))requiresRunningHubAccount=true;
       else url=parsed.toString();
     }else requiresRunningHubAccount=true;
   }catch{requiresRunningHubAccount=true;}

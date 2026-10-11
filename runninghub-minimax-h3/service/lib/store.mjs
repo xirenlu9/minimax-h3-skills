@@ -1,6 +1,7 @@
 import {createCipheriv,createDecipheriv,createHash,randomBytes,scryptSync,randomUUID} from 'node:crypto';
 import {mkdir,open,readFile,rename,unlink,writeFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
+import {atomicSave} from '../../scripts/privateStore.mjs';
 
 const STATE_VERSION=1;
 const verifierText='runninghub-minimax-h3-independent-vault-v1';
@@ -16,10 +17,7 @@ function decrypt(key,entry){
   return Buffer.concat([decipher.update(Buffer.from(entry.ciphertext,'base64')),decipher.final()]).toString('utf8');
 }
 async function atomicJson(path,value){
-  const temp=path+'.'+randomUUID()+'.tmp';
-  const handle=await open(temp,'wx',0o600);
-  try{await handle.writeFile(JSON.stringify(value));await handle.sync();}finally{await handle.close();}
-  await rename(temp,path);
+  await atomicSave(path,Buffer.from(JSON.stringify(value)));
 }
 export function fingerprint(secret){return createHash('sha256').update(secret).digest('hex');}
 export function encryptSecret(key,secret){return encrypt(key,secret);}
@@ -28,15 +26,15 @@ export function decryptSecret(key,entry){return decrypt(key,entry);}
 export async function unlockDataDirectory(inputDir,passphrase){
   if(typeof passphrase!=='string'||passphrase.length<12)throw Error('Vault passphrase must contain at least 12 characters.');
   const dir=resolve(inputDir);await mkdir(dir,{recursive:true,mode:0o700});
-  const statePath=join(dir,'state.json');let state;
+  const statePath=join(dir,'state.json');let state,exists=true;
   try{state=JSON.parse(await readFile(statePath,'utf8'));}
-  catch(error){if(error.code!=='ENOENT')throw Error('Service state is unreadable; preserve the data directory and inspect it before recovery.');}
-  if(!state){
+  catch(error){if(error.code!=='ENOENT')throw Error('Service state is unreadable; preserve the data directory and inspect it before recovery.');exists=false;}
+  if(!exists){
     const salt=randomBytes(16),key=derive(passphrase,salt);
     state={version:STATE_VERSION,salt:salt.toString('base64'),verifier:encrypt(key,verifierText),keys:[],jobs:[]};
     await atomicJson(statePath,state);return {dir,statePath,key,state};
   }
-  if(state.version!==STATE_VERSION||!Array.isArray(state.keys)||!Array.isArray(state.jobs)||!state.salt||!state.verifier)throw Error('Service state format is invalid or unsupported.');
+  if(!state||state.version!==STATE_VERSION||!Array.isArray(state.keys)||!Array.isArray(state.jobs)||!state.salt||!state.verifier)throw Error('Service state format is invalid or unsupported.');
   const key=derive(passphrase,Buffer.from(state.salt,'base64'));
   try{if(decrypt(key,state.verifier)!==verifierText)throw Error();}catch{throw Error('Vault passphrase is incorrect or the vault is damaged.');}
   return {dir,statePath,key,state};

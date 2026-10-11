@@ -1,6 +1,6 @@
 interface:
   display_name: "RunningHub MiniMax H3"
-  short_description: "使用消费级 RunningHub H3 应用生成多参考视频，选择参数并恢复任务"
+  short_description: "独立本机服务与加密 Key 池，按账户并发生成 H3 视频并恢复任务"
   default_prompt: "用 $runninghub-minimax-h3 根据我的提示词和参考素材生成一次视频。"
 policy:
   allow_implicit_invocation: true

@@ -3,6 +3,7 @@ import {dirname,resolve,join} from 'node:path';
 import {homedir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
+import {journalPath as privateJournal} from './directH3.mjs';
 
 function localBase(value=`http://127.0.0.1:${process.env.RH_H3_PORT||'4317'}`){
   const url=new URL(value);if(url.protocol!=='http:'||url.hostname!=='127.0.0.1'||url.username||url.password||url.search||url.hash||url.pathname!=='/')throw Error('Only the local independent RunningHub H3 service is supported.');return url.origin;
@@ -25,12 +26,14 @@ function publicResult(path,job,extra={}){return {journal:path,jobId:job.id,opera
 
 export async function run(args){
   const [action,...rest]=args,flags=parseFlags(rest);
-  if(!['prepare','generate','status','resume'].includes(action)||!flags.journal)throw Error('Usage: node scripts/h3.mjs prepare --manifest INPUT.json --journal NEW.json [--base http://127.0.0.1:4317]; generate|status|resume --journal SAME.json');
-  const journalPath=resolve(flags.journal),base=localBase(flags.base||process.env.RH_H3_BASE);
+  if(!['prepare','generate','status','resume','cancel'].includes(action)||!flags.journal)throw Error('Usage: prepare --manifest INPUT.json --journal PRIVATE.json; generate --journal SAME.json --confirm submit; status|resume|cancel --journal SAME.json');
+  if(action==='generate'&&flags.confirm!=='submit')throw Error('Generation may incur charges. Explicit user authorization and --confirm submit are required.');
+  const journalPath=(await privateJournal(dataDirectory(),flags.journal)).path,base=localBase(flags.base||process.env.RH_H3_BASE);
   if(action==='prepare'){
     if(!flags.manifest)throw Error('prepare requires --manifest.');
     const manifestPath=resolve(flags.manifest),manifest=JSON.parse(await readFile(manifestPath,'utf8'));
-    const input={prompt:await readPrompt(manifest,manifestPath),references:(manifest.references||[]).map(ref=>({path:ref.path,kind:ref.kind,role:ref.role||'reference'})),parameters:manifest.parameters||{},...(typeof manifest.keyId==='string'?{keyId:manifest.keyId}:{})};
+    if((typeof manifest.prompt==='string')===(typeof manifest.promptFile==='string'))throw Error('Provide exactly one of prompt and promptFile.');
+    const input={prompt:await readPrompt(manifest,manifestPath),references:(manifest.references||[]).map(ref=>({path:resolve(dirname(manifestPath),ref.path),kind:ref.kind,role:ref.role||'reference'})),parameters:manifest.parameters||{},...(typeof manifest.keyId==='string'?{keyId:manifest.keyId}:{})};
     let state;try{state=JSON.parse(await readFile(journalPath,'utf8'));}catch(error){if(error.code!=='ENOENT')throw Error('Journal exists but is unreadable.');}
     if(state&&state.phase!=='preparing')throw Error('Journal already contains a prepared operation; choose a new journal for new input.');
     if(state&&!state.operationId)throw Error('Existing preparation journal has no operationId.');
@@ -44,8 +47,9 @@ export async function run(args){
   const state=JSON.parse(await readFile(journalPath,'utf8'));if(state.base!==base)throw Error('Journal service URL does not match this call; use the original --base.');if(!state.jobId)throw Error('Journal has no prepared service job.');
   if(action==='generate'){
     state.phase='queue_requested';await save(journalPath,state);
-    const result=await request(base,`/api/jobs/${encodeURIComponent(state.jobId)}/submit`,{});state.phase=result.job.status==='queued'?'queued':result.job.status;await save(journalPath,state);return publicResult(journalPath,result.job);
+    const result=await request(base,`/api/jobs/${encodeURIComponent(state.jobId)}/submit`,{confirmation:'submit'});state.phase=result.job.status;await save(journalPath,state);return publicResult(journalPath,result.job);
   }
+  if(action==='cancel'){const result=await request(base,`/api/jobs/${encodeURIComponent(state.jobId)}/cancel`,{});state.phase=result.job.status;await save(journalPath,state);return publicResult(journalPath,result.job);}
   const result=await request(base,`/api/jobs/${encodeURIComponent(state.jobId)}`);state.phase=result.job.status;await save(journalPath,state);return publicResult(journalPath,result.job);
 }
 

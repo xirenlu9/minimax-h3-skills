@@ -7,4 +7,10 @@ node_modules/
 **/*journal*.json
 **/*.tmp
 **/.runninghub-h3-service/
+**/service.token
+**/state.json
+**/vault.passphrase.dpapi
+**/accounts*.txt
+**/*accounts*.txt
+**/credentials*.json
 *.log

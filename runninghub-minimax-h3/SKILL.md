@@ -1,64 +1,36 @@
 ---
 name: runninghub-minimax-h3
-description: 使用独立本机服务和 RunningHub 国际站消费级 AI App 2084320751339032577，根据用户原文 MiniMax H3 提示词与最多六图、三音频、一视频选择参数、提交视频生成，并查询和恢复同一任务。
+description: 使用 RunningHub 国际站消费级 H3 应用预览参数、生成视频和恢复任务。独立本机服务管理加密 Key 池与账户级并发队列；导入密钥不会生成视频。
 ---
 
 # RunningHub MiniMax H3
 
-固定使用 RunningHub 国际站消费级 AI App `2084320751339032577`。不切换应用、不调用工作流执行接口、不读取或回显 API Key。用户请求生成即授权一次提交；仅要求预览参数时不提交。费用未知时保留为 `null`，不能称为免费。
+固定 AI App `2084320751339032577`。不切换应用或执行工作流，不改写用户已有 H3 提示词。未知费用保持 `null`；最低积分是调度阈值，不是一次视频的费用预测。
 
-## 独立本机服务
+## 按需读取
 
-本 skill 自带 `service/`：服务自己管理消费级 Key 池、加密 vault、任务账本和执行器。它不依赖其他项目。先按 [本机安装与密钥管理](references/local-installation.md) 启动服务并配置消费级 Key。
+- 配置 Key、启动执行器、余额或并发管理：只读 [本机服务](references/local-installation.md)。凭据在 Skill/Git 目录外加密保存，不读取原文 Key、密码或 vault 到模型上下文。
+- 单条视频预览/生成/查询：使用下面命令；只在需要参数细节时读 [应用参数](references/app-parameters.md)。
+- 旧 Manju 项目或旧服务 journal：只读 [兼容入口](references/manju-compat.md)，使用 `scripts/h3-manju.mjs`。不把旧 journal 交给新版服务。
+- 旧本地直接 Key 池的历史任务：只读 [旧池兼容](references/key-pool.md)。已迁移池禁止新任务，防止两套执行器同时消费同一账户。
 
-服务只绑定 loopback。`scripts/h3.mjs` 只通过本机鉴权 API 操作服务，不接触 RunningHub Key。准备阶段读取固定应用的公开 schema 并在账本中保存操作；不会上传素材或提交生成。用户确认生成后才排队、上传输入素材并提交。服务通过同一 Key 查询任务结果。
+## 视频操作
 
-## 输入 manifest
-
-```json
-{
-  "prompt": "原始 H3 提示词，包含与参考素材编号一致的 <Picture 1> 等标签",
-  "references": [
-    {"path": "./reference.png", "kind": "image", "role": "first-frame"}
-  ],
-  "parameters": {"durationSeconds": 10, "aspectRatio": "16:9"}
-}
-```
-
-- 提示词可用 `prompt` 或 `promptFile` 提供，保留用户原文，不自动改写剧情。
-- `references` 每项需要本机 `path`、`kind`（`image`/`audio`/`video`）和可选 `role`。不支持其他服务的 `assetId`。
-- `keyId` 可选；仅当用户指定某个 Key 或需要区分并发任务时填写。省略时执行器选择任一空闲且已启用的消费级 Key。
-- 最多六张图片、三段音频、一段视频。支持格式与大小上限见安装说明。不要因标签缺失而静默丢弃素材。
-- `role` 可为 `reference`、`first-frame`、`last-frame`、`character`、`scene`、`motion`、`voice`、`sound`、`music`。非通用角色需在原提示词中明确对应标签。通用参考槽不保证严格首尾帧锁定。
-- 参数可选：`durationSeconds`（5–15 的整数，缺省从提示词识别秒数，否则10）、`aspectRatio`（缺省按首帧图片尺寸选最接近的支持比例；没有首帧时16:9）、`megapixels`、`steps`、`promptOptimization`、`highestConsistency`、`interpolation`、`loraStrength`、`zipOnly`。
-
-## 命令
-
-先在一个终端启动执行器：
+manifest 使用 `prompt` 或 `promptFile` 二选一；参考素材为本地 `path`、`kind` 与可选 `role`。相对路径以 manifest 目录为基准。最多六图、三音频、一视频，原文使用对应 `<Picture 1>`、`<Audio 1>`、`<Video 1>` 标签。非通用角色应在原文说明对应标签；通用图片槽不保证严格首尾帧锁定。
 
 ```text
 node service/cli.mjs start
-```
-
-在另一个终端预览、提交和查看：
-
-```text
-node scripts/h3.mjs prepare --manifest INPUT.json --journal NEW.json
-node scripts/h3.mjs generate --journal SAME.json
+node scripts/h3.mjs prepare --manifest INPUT.json --journal PRIVATE.json
+node scripts/h3.mjs generate --journal SAME.json --confirm submit
 node scripts/h3.mjs status --journal SAME.json
 node scripts/h3.mjs resume --journal SAME.json
+node scripts/h3.mjs cancel --journal SAME.json
 ```
 
-`prepare` 会固定操作 ID 并写入本机 journal。网络重试须使用相同 journal 和操作 ID。`generate` 只把同一账本任务排队，重复调用不会新建或再次提交任务；`status` 和 `resume` 只读取该任务状态，不提交任务。结果状态、任务 ID和服务收到的费用字段会显示在查询结果中；远端没有提供费用时保持未知。若下载 URL 含有 RunningHub 签名凭据，服务会隐藏该链接，使用任务 ID 在 RunningHub 账户界面查看结果。
+journal 必须位于服务私有数据目录内。`prepare` 只校验素材、读取公开 schema、保存预览，不上传或生成。`cancel` 仅取消尚未提交的本地工作。
 
-服务在发起远端任务前先持久化 `submitting` 意图。若进程在提交期间退出或响应不明确，任务会成为 `submission_unknown`，不会自动重发。先到 RunningHub 账户确认是否已有任务；若找到任务，使用 `node service/cli.mjs job attach-task JOB_ID RUNNINGHUB_TASK_ID` 将原任务接回本地轮询。确认没有远端任务后，可用 `node service/cli.mjs job resolve-not-accepted JOB_ID` 释放该本地并发槽；该命令只关闭原账本项，不会重提任务。未核实前不要另建任务。
+用户明确要求生成才授权一次提交；批次必须明确授权任务数，每段独立 journal。导入 Key、查余额、修复或启动服务均不构成视频生成授权。确认后排队，执行器默认全局并发3、每账户组1；不等于平台实际并发权限。
 
-输入参数映射见 [H3 应用参数](references/app-parameters.md)。成功状态不代表画面或音频质量验收；需要打开结果并检查画面、时长和音轨后再作质量描述。
+已受理任务始终绑定原 Key/taskId。`status`/`resume` 不重提任务，远端排队不回到本地提交队列。仅在尚未提交、实时余额低于阈值且用户未指定 Key 时选择其他可用账户；平台限流、鉴权异常、schema 改变、查询失败或提交不明时暂停新提交，不换账户绕过错误。`submission_unknown` 必须查原账户并人工接回 taskId 或确认未受理；未查明不能释放槽或新建替代任务。
 
-## 多段生成经验
-
-- 用户明确选定并保留的成片，按 job ID 冻结；后续段落不得覆盖或自动重跑。除非用户要求多个版本，每个后续段落单独创建一个 journal 和一个生成任务。
-- 多任务并发时遵循用户对 Key 的要求。若用户要求不同 Key，提交前确认有足够的、已验证且账户组互异的消费级 Key；在每份 manifest 填入所需 `keyId`。提交后从任务状态核对实际 Key/账户组绑定。一个账户组的本地并发上限为1；容量不够时不要悄悄复用。
-- 用前段尾帧作后段连续性参考时，保留原片，并明确说明参考图只是构图/连续性锚点；通用图片槽不保证严格首帧锁定。提示词还应写明后段开场状态和交给下一段的视觉接点。
-- 生成后按可访问的输出验收实际时长、画幅、分辨率、帧率和音轨；抽查开头、中段、结尾及转场。音轨存在不代表对白清晰或情绪到位，涉及声音质量时需要实际试听再作判断。请求时长是目标值，报告时优先使用文件元数据中的实际时长。
-- 费用分别报告远端回传的消费级账户币数和钱包金额；未返回的费用继续记为未知，不推断免费或只扣平台币。恢复任务用原 journal 的 `status`/`resume`，不新建任务替代。
+成功仅表示收到结果。报告画面、时长、音轨质量前应实际查看/试听；带签名凭据的链接不回显。保留用户已经选定的成片，不自动重跑。

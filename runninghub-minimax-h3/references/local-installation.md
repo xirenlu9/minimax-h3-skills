@@ -1,48 +1,62 @@
-# 独立本机服务：安装与密钥管理
+# 独立本机服务：Key 池与执行器
 
-## 要求与启动
+基于上游 `ff8d400`，补充远端排队隔离、实时余额预检、异常暂停和 Windows 安全迁移。Node.js 20+，无 npm 依赖，不需要租云服务器或修改导演台。
 
-- Node.js 20 或更新版本。服务使用 Node 内置模块，不需要安装 npm 包。
-- 从本仓库的 `runninghub-minimax-h3/` 目录运行命令。
-- 启动执行器：
+## 数据与启动
 
-  ```text
-  node service/cli.mjs start
-  ```
-
-- 首次启动会创建数据目录 `~/.runninghub-h3-service/`，并两次隐藏提示输入至少12位的 vault passphrase。后续启动使用同一 passphrase 解锁密钥。服务监听 `127.0.0.1:4317`；关闭终端会停止执行器。
-- 可用 `RH_H3_HOME` 改数据目录、`RH_H3_PORT` 改本机端口。执行服务和 skill CLI 的终端必须使用同样的设置。只有在无人值守时才设置 `RH_H3_VAULT_PASSPHRASE`；环境变量可能被同一用户运行的其他进程读取。
-- `state.json` 保存密钥密文、任务输入和状态；API Key 使用 AES-256-GCM 加密，密钥从 passphrase 和本地随机 salt 通过 scrypt 派生。`service.token` 用于本机 CLI 鉴权。两个文件均留在本机数据目录，不要提交到 Git 或分享给他人。
-
-## 消费级 Key 池
-
-服务启动后，在另一个终端导入密钥。Key 不作为命令行参数，输入时不会回显：
+默认数据目录 `~/.runninghub-h3-service/`；可用 `RH_H3_HOME` 指定绝对路径，但不能位于 Skill/Git 仓库内。默认端口 `127.0.0.1:4317`，可用 `RH_H3_PORT` 修改，服务与 CLI 设置必须一致。
 
 ```text
-node service/cli.mjs key add --account-group personal-main
+node service/cli.mjs start
+```
+
+Windows 首次启动自动创建随机 vault passphrase，并用当前用户 DPAPI 加密保存至 `vault.passphrase.dpapi`；不写命令参数、环境变量或明文临时文件。API Key 使用 AES-256-GCM 存入 `state.json`，`service.token` 用于本机鉴权。DPAPI 自动解锁不能跨用户/机器复制使用。
+
+其他平台沿用隐藏输入 passphrase 的上游方式；已有手工 passphrase vault 必须用原密码，不能覆盖创建新密码。仅在用户明确需要无人值守外部密码管理时使用原上游 `RH_H3_VAULT_PASSPHRASE` 环境方式，注意同一用户进程可能读取环境。
+
+保持执行器进程运行；关闭进程不会取消远端视频，重启后按账本查询原任务。
+
+## 导入现有个人池
+
+服务停止时运行以下迁移，原五字段文件只在脚本进程内解析，邮箱、登录密码、邮箱密码不进入新 vault；同账户使用邮箱哈希形成匿名账户组。
+
+```text
+node service/cli.mjs migrate --file ACCOUNT_FILE.txt --legacy-pool OLD_PRIVATE_DIRECTORY
+node service/cli.mjs start
+node service/cli.mjs key probe-all
+node service/cli.mjs executor resume
+```
+
+旧池有活动/未知任务或来源文件不存在则拒绝迁移。先持久化冻结旧池，再写入新库；源与目标完成确认前新服务禁止恢复，防止中途写盘失败造成双执行器。失败后不自动解冻，修正故障并重复同一迁移命令恢复。保留旧历史账本；重复迁移不覆盖新池启用状态、余额或任务，但会暂停执行器等待确认。导入初始禁用；只读核验成功才恢复原启用意图，人工确认后恢复执行器。核验错误会暂停整个执行器，不循环换账户绕过。
+
+手工添加一把新 Key：`node service/cli.mjs key add --account-group ALIAS`，Key 隐藏输入；同一账户必须同组。然后 `key probe KEY_ID`、`key enable KEY_ID`。`key probe` 按 ID 直接查余额，零余额充值后也能刷新，不需要制造生成预约。
+
+## 管理命令
+
+```text
 node service/cli.mjs key list
-node service/cli.mjs key probe rhkey_ID
-node service/cli.mjs key enable rhkey_ID
-node service/cli.mjs key disable rhkey_ID
+node service/cli.mjs key probe KEY_ID
+node service/cli.mjs key disable KEY_ID
+node service/cli.mjs executor status
+node service/cli.mjs executor pause
+node service/cli.mjs executor resume
+node service/cli.mjs settings --max-concurrent 3 --min-credits 1
 node service/cli.mjs job list
 ```
 
-只导入 RunningHub 国际站消费级 32 位十六进制 API Key。新 Key 默认禁用；`probe` 读取账户状态，只有 `apiType` 报告为 `NORMAL` 才会标记为消费级，随后需显式 `enable`。同一个 RunningHub 账户下的多个 Key 必须用同一 `--account-group` 值；不同账户使用不同值。账本对每个账户组只同时提交一个任务，执行器全局最多处理四个活动任务。该本地限制不代表 RunningHub 账户的实际并发额度。
+全局并发可设1–4，默认3；每账户组最多一个活动任务，远端排队和受理不明均占槽。本地设置不增加平台配额。最低积分必须大于零，但不代表足够支付一条视频；实际消费以平台账单为准。
 
-可通过 `key list` 查看启用状态、账户组、指纹和经验证的账户状态摘要。服务不会提供显示或导出原始 API Key 的命令。密钥只绑定导入时的账户组；若归属录错，先禁用该 Key，再用正确账户组重新导入并完成验证。
+仅在新任务提交前、实时余额不足时允许重新选账户；已指定 Key 不静默换绑。遇到限流、鉴权失败、查询错误或受理不明暂停所有新提交。已发出的请求不能撤回；暂停门只阻止尚未发出的请求，已有任务仍用原 Key 查询。
 
-需要指定某个 Key 时，在 manifest 顶层加入 `"keyId": "rhkey_实际ID"`；服务会绑定并保留这个选择，不会静默换用其他 Key。省略时由执行器挑选空闲 Key。`job list` 可查看所有账本任务、远端 taskId 和实际 Key/账户组绑定，在 journal 丢失时用于找回任务。
+## 未知提交恢复
 
-## 素材与任务
+先在原 RunningHub 账户确认任务：
 
-准备请求要求每项参考素材是本机文件路径。图片支持 JPG、JPEG、PNG、WebP；音频支持 MP3、WAV、FLAC；视频支持 MP4、AVI、MOV、MKV。每个文件最大30 MB，音频额外限制20 MB。素材只在 `generate` 后上传；准备阶段会检查文件并读取 RunningHub 公开 H3 应用 schema。
+```text
+node service/cli.mjs job attach-task JOB_ID ORIGINAL_TASK_ID
+node service/cli.mjs job resolve-not-accepted JOB_ID
+```
 
-执行器仅访问 `https://www.runninghub.ai` 的消费级 AI App 接口：账户状态、资源上传、AI App 提交和任务输出查询。提交任务不调用工作流执行端点，也不切换到其他服务商。
+`attach-task` 会用原 Key 查询并确认该 taskId，拒绝覆盖其他账本绑定。确认没有任务后，`resolve-not-accepted` 要求输入完整确认语句，只关闭原账本项，不重发。尚有未知提交时禁止 `executor resume`。
 
-服务退出时，正在上传的任务可安全回到队列，因为上传本身不会启动视频生成；退出时已处于 `submitting` 的任务在下次启动后进入 `submission_unknown`。此状态保留账户并发槽，直到查明 RunningHub 是否接收：找到远端任务时通过 `job attach-task` 接回原任务查询；确认无任务后运行 `job resolve-not-accepted`，并输入完整确认语句释放本地槽。这个命令只关闭原账本项，不会再次提交。服务不会盲目重试提交。输出 URL 若含签名凭据不会回传；使用任务 ID 在 RunningHub 账户界面取回结果。本服务不代为下载媒体文件。
-
-## 官方接口参考
-
-- [RunningHub Get Account Information](https://www.runninghub.ai/runninghub-api-doc-en/api-425761030)：本服务用此消费级账户状态接口验证 Key 类型并读取可用账户摘要。
-- [RunningHub Upload Resource](https://www.runninghub.ai/runninghub-api-doc-en/api-425761099)：官方上传文档列出图像、音频、视频格式与单文件大小限制。
-- [RunningHub AI Application integration example](https://www.runninghub.ai/runninghub-api-doc-en/doc-8287470)：介绍 AI App `nodeInfoList` 提交与任务输出查询的接口流程。
+输入素材上传与实际视频生成仅在用户明确授权 `generate --confirm submit` 后执行。准备、迁移、核验不会提交视频。带凭据的结果链接不回显，必要时使用 taskId 到平台查看。

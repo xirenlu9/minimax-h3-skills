@@ -4,6 +4,8 @@ import {readFile,mkdir,access} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {createInterface} from 'node:readline/promises';
 import {unlockDataDirectory,acquireProcessLock} from './lib/store.mjs';
+import {windowsPassphrase} from './lib/windowsVault.mjs';
+import {privateDirectory} from '../scripts/privateStore.mjs';
 
 export const dataDirectory=()=>resolve(process.env.RH_H3_HOME||join(homedir(),'.runninghub-h3-service'));
 const defaultBase=()=>process.env.RH_H3_BASE||`http://127.0.0.1:${process.env.RH_H3_PORT||'4317'}`;
@@ -31,15 +33,37 @@ function print(value){process.stdout.write(JSON.stringify(value,null,2)+'\n');}
 
 async function start(){
   const fromEnvironment=Boolean(process.env.RH_H3_VAULT_PASSPHRASE);let passphrase=process.env.RH_H3_VAULT_PASSPHRASE;
+  if(!passphrase&&process.platform==='win32')passphrase=await windowsPassphrase(dataDirectory());
   if(!passphrase)passphrase=await promptSecret('Vault passphrase (not echoed): ');
   const port=Number(process.env.RH_H3_PORT||4317);if(!Number.isInteger(port)||port<1||port>65535)throw Error('RH_H3_PORT must be between 1 and 65535.');
-  const dir=dataDirectory();await mkdir(dir,{recursive:true,mode:0o700});const releaseLock=await acquireProcessLock(dir);
-  try{let hasState=true;try{await access(join(dir,'state.json'));}catch(error){if(error.code==='ENOENT')hasState=false;else throw error;}if(!hasState&&!fromEnvironment){const confirmation=await promptSecret('Confirm vault passphrase (not echoed): ');if(confirmation!==passphrase)throw Error('Vault passphrases did not match; no service data was created.');}const unlocked=await unlockDataDirectory(dir,passphrase);const {startServer}=await import('./server.mjs');await startServer({unlocked,port,releaseLock});}
+  const dir=await privateDirectory(dataDirectory());const releaseLock=await acquireProcessLock(dir);
+  try{let hasState=true;try{await access(join(dir,'state.json'));}catch(error){if(error.code==='ENOENT')hasState=false;else throw error;}if(!hasState&&!fromEnvironment&&process.platform!=='win32'){const confirmation=await promptSecret('Confirm vault passphrase (not echoed): ');if(confirmation!==passphrase)throw Error('Vault passphrases did not match; no service data was created.');}const unlocked=await unlockDataDirectory(dir,passphrase);const {startServer}=await import('./server.mjs');await startServer({unlocked,port,releaseLock});}
   catch(error){await releaseLock();throw error;}
 }
 async function main(args){
   const [group,action,...rest]=args;
   if(group==='start'&&!action)return start();
+  if(group==='migrate'){
+    const flags=options([action,...rest]);if(!flags.file||!flags['legacy-pool'])throw Error('Usage: migrate --file ACCOUNT_FILE --legacy-pool PRIVATE_DIRECTORY');
+    const dir=await privateDirectory(dataDirectory()),release=await acquireProcessLock(dir);
+    try{const passphrase=process.env.RH_H3_VAULT_PASSPHRASE||await windowsPassphrase(dir),unlocked=await unlockDataDirectory(dir,passphrase);
+      const {migrateLegacyPool}=await import('./lib/migration.mjs');print(await migrateLegacyPool({unlocked,poolDirectory:resolve(flags['legacy-pool']),accountFile:resolve(flags.file)}));}
+    finally{await release();}return;
+  }
+  if(group==='executor'&&['status','pause','resume'].includes(action)){print(await call(action==='status'?'/api/executor':`/api/executor/${action}`,action==='status'?{}:{method:'POST',body:{}}));return;}
+  if(group==='settings'){
+    const flags=options([action,...rest].filter(Boolean)),body={};
+    if(flags['max-concurrent']!==undefined)body.maxConcurrent=Number(flags['max-concurrent']);if(flags['min-credits']!==undefined)body.minCredits=Number(flags['min-credits']);
+    print(await call('/api/settings',{method:'PATCH',body}));return;
+  }
+  if(group==='key'&&action==='probe-all'){
+    const before=await call('/api/keys');let checked=0;
+    for(const entry of before.keys){try{await call(`/api/keys/${encodeURIComponent(entry.keyId)}/probe`,{method:'POST',body:{}});checked++;}
+      catch{print({checked,total:before.keys.length,stopped:true,error:'Account verification failed; stopped without rotating around the error.'});process.exitCode=1;return;}
+      await new Promise(ok=>setTimeout(ok,250));
+    }
+    const after=await call('/api/keys');print({checked,total:after.keys.length,consumer:after.keys.filter(e=>e.consumerStatus==='consumer').length,enabled:after.keys.filter(e=>e.enabled).length,zeroBalance:after.keys.filter(e=>e.accountStatus?.remainCoins===0).length,billingTaskSubmitted:false});return;
+  }
   if(group==='key'&&action==='add'){
     const flags=options(rest),accountGroup=flags['account-group'];if(!accountGroup)throw Error('Provide --account-group so multiple keys from the same RunningHub account share one local concurrency slot.');
     const apiKey=(await promptSecret('RunningHub consumer API key (not echoed): ')).trim();const result=await call('/api/keys',{method:'POST',body:{apiKey,accountGroup}});print(result);return;
@@ -60,7 +84,7 @@ async function main(args){
     print(await call(`/api/jobs/${encodeURIComponent(jobId)}/resolve-not-accepted`,{method:'POST',body:{confirmation:answer}}));return;
   }
   if(group==='job'&&action==='list'){print(await call('/api/jobs'));return;}
-  throw Error('Usage: node service/cli.mjs start | key add --account-group ALIAS | key list | key probe KEY_ID | key enable KEY_ID | key disable KEY_ID | job list | job attach-task JOB_ID TASK_ID | job resolve-not-accepted JOB_ID');
+  throw Error('Usage: start | migrate --file ACCOUNT_FILE --legacy-pool PRIVATE_DIRECTORY | key add/list/probe/probe-all/enable/disable | executor status/pause/resume | settings --max-concurrent 3 --min-credits 1 | job list/attach-task/resolve-not-accepted');
 }
 
 if(process.argv[1]&&resolve(process.argv[1])===resolve(fileURLToPath(import.meta.url))){
