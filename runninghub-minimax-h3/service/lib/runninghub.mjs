@@ -21,7 +21,8 @@ const MEDIA_TYPES={
   mp3:['audio/mpeg','audio'],wav:['audio/wav','audio'],flac:['audio/flac','audio'],
   mp4:['video/mp4','video'],avi:['video/x-msvideo','video'],mov:['video/quicktime','video'],mkv:['video/x-matroska','video'],
 };
-const timeoutSignal=(ms=30000)=>AbortSignal.timeout(ms);
+// 只扩大请求等待预算，保持轮询频率、单次提交与异常暂停策略不变。
+const timeoutSignal=(ms=30000)=>AbortSignal.timeout(ms*3);
 
 async function jsonRequest(url,init={},timeout=30000){
   let response;
@@ -210,7 +211,7 @@ export async function downloadTaskOutput(apiKey,taskId,index){
   if(typeof item?.fileUrl!=='string')throw Error('RunningHub output was not found.');
   let target;try{target=new URL(item.fileUrl);}catch{throw Error('RunningHub output URL is invalid.');}
   if(target.protocol!=='https:'||target.username||target.password)throw Error('RunningHub output must use a safe HTTPS URL.');
-  const response=await fetch(target,{redirect:'error',signal:AbortSignal.timeout(120000)});
+  const response=await fetch(target,{redirect:'error',signal:AbortSignal.timeout(360000)});
   if(!response.ok){await response.body?.cancel();throw Error('RunningHub output download failed.');}
   return response;
 }
